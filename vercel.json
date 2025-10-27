@@ -2,8 +2,9 @@
     "cleanUrls": true,
     "rewrites": [
       { "source": "/api/(.*)", "destination": "/api/$1" },
-      { "source": "/", "destination": "/web/index.html" },
-      { "source": "/(.*)", "destination": "/web/$1" }
+      { "source": "/styles.css", "destination": "/web/styles.css" },
+      { "source": "/app.js", "destination": "/web/app.js" },
+      { "source": "/", "destination": "/web/index.html" }
     ]
-  }
+}
   
