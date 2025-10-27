@@ -1,0 +1,9 @@
+{
+    "cleanUrls": true,
+    "rewrites": [
+        { "source": "/app.js", "destination": "/web/app.js" },
+        { "source": "/styles.css", "destination": "/web/styles.css" },
+        { "source": "/", "destination": "/web/index.html" }
+    ]
+}
+  

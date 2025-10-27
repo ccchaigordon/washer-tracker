@@ -1,0 +1,14 @@
+{
+  "name": "washer-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "vercel --prod --yes"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "typescript": "^5.9.3",
+    "vercel": "^48.6.0"
+  }
+}
