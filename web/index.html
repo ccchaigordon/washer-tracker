@@ -14,11 +14,25 @@
           <div id="subtitle" class="subtitle"></div>
         </header>
 
+        <div
+          id="toast"
+          class="toast"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+
         <div class="controls">
+          <select id="hostelSelect" class="hostel-select"></select>
           <button id="refresh" class="refresh-btn">
             <span class="btn-text">Refresh Status</span>
           </button>
           <div id="updated" class="status-text"></div>
+        </div>
+
+        <div id="disclaimer" class="disclaimer">
+          Note: Machine connectivity can be inconsistent. Status and links may
+          be inaccurate at times.
         </div>
 
         <div id="grid" class="grid"></div>

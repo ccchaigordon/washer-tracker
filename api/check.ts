@@ -6,16 +6,58 @@ const UPSTREAM_REFERER = process.env.UPSTREAM_REFERER || "";
 const UPSTREAM_X_REQUESTED_WITH = process.env.UPSTREAM_X_REQUESTED_WITH || "";
 const UPSTREAM_HEADERS_JSON = process.env.UPSTREAM_HEADERS_JSON || "";
 
+// Washer
 const DEFAULT_AMOUNT = Number(process.env.DEFAULT_AMOUNT ?? 4.5);
 const DEFAULT_DURATION = Number(process.env.DEFAULT_DURATION ?? 37);
 const DEFAULT_MODE = String(process.env.DEFAULT_MODE || "warm");
 
-function readBase(): any {
+// Dryer
+const DEFAULT_DRYER_AMOUNT = Number(process.env.DEFAULT_DRYER_AMOUNT ?? DEFAULT_AMOUNT);
+const DEFAULT_DRYER_DURATION = Number(process.env.DEFAULT_DRYER_DURATION ?? 40);
+const DEFAULT_DRYER_TEMPERATURE = String(process.env.DEFAULT_DRYER_TEMPERATURE || "low");
+
+const CHECKOUT_URL_RE =
+  /https:\/\/pg\.revenuemonster\.my\/v3\/checkout\?checkoutId=[A-Za-z0-9_-]+/;
+
+// JSON bases
+function readJSONEnv<T = any>(key: string, fallback: T): T {
   try {
-    return JSON.parse(process.env.BASE_PAYLOAD_JSON || "{}");
+    const raw = process.env[key];
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
   } catch {
-    return {};
+    return fallback;
   }
+}
+
+function resolveWasherBase(hostelId?: string): any {
+  const id = String(hostelId || "").trim().toUpperCase();
+  const tryKeys = [
+    id ? `BASE_WASHER_PAYLOAD_JSON_${id}` : "",
+    "BASE_WASHER_PAYLOAD_JSON",
+    id ? `BASE_PAYLOAD_JSON_${id}` : "",
+    "BASE_PAYLOAD_JSON"
+  ].filter(Boolean);
+  for (const k of tryKeys) {
+    const v = readJSONEnv<any>(k, null as any);
+    if (v && typeof v === "object" && Object.keys(v).length) return clone(v);
+  }
+  return null;
+}
+
+function resolveDryerBase(hostelId?: string): any {
+  const id = String(hostelId || "").trim().toUpperCase();
+  const tryKeys = [
+    id ? `BASE_DRYER_PAYLOAD_JSON_${id}` : "",
+    "BASE_DRYER_PAYLOAD_JSON",
+    id ? `DRYER_BASE_PAYLOAD_JSON_${id}` : "",
+    "DRYER_BASE_PAYLOAD_JSON"
+  ].filter(Boolean);
+  for (const k of tryKeys) {
+    const v = readJSONEnv<any>(k, null as any);
+    if (v && typeof v === "object" && Object.keys(v).length) return clone(v);
+  }
+  return null;
 }
 
 function sanitizeString(x: unknown, max = 64): string {
@@ -23,10 +65,70 @@ function sanitizeString(x: unknown, max = 64): string {
 }
 
 type MachineStatus = "Available" | "Occupied" | "Unknown" | "Error";
+type Kind = "washer" | "dryer";
+
+function detectKind(machineNo?: string, name?: string): Kind {
+  const a = String(machineNo || "").toLowerCase();
+  const b = String(name || "").toLowerCase();
+  if (/-d\d*$/i.test(a) || /-d\d*$/i.test(b) || /-d(?![a-z])/i.test(a) || /-d(?![a-z])/i.test(b)) return "dryer";
+  if (/-w\d*$/i.test(a) || /-w\d*$/i.test(b) || /-w(?![a-z])/i.test(a) || /-w(?![a-z])/i.test(b)) return "washer";
+  return "washer";
+}
+
+function clone<T>(x: T): T {
+  try { return structuredClone(x); } catch { return JSON.parse(JSON.stringify(x)); }
+}
+
+function baseFor(kind: Kind, hostelId?: string): any {
+  if (kind === "washer") {
+    const resolved = resolveWasherBase(hostelId);
+    if (resolved) return resolved;
+    return {
+      machine: {
+        type: "Washer",
+        capacity: "13kg",
+        online: true,
+        running: false,
+        outletName: "USM05",
+        priceData: [
+          { defaultmode: "cold", runtime: 37, name: "cold", price: DEFAULT_AMOUNT },
+          { defaultmode: "cold", runtime: 37, name: "warm", price: DEFAULT_AMOUNT },
+          { defaultmode: "cold", runtime: 37, name: "hot",  price: DEFAULT_AMOUNT }
+        ]
+      },
+      outlet: { outletCode: "undefined", operatorCode: "undefined" }
+    };
+  } else {
+    const resolved = resolveDryerBase(hostelId);
+    if (resolved) return resolved;
+    return {
+      machine: {
+        type: "Dryer",
+        capacity: "10kg",
+        online: true,
+        running: false,
+        outletName: "USM05",
+        priceData: {
+          runTime: 10,
+          maxPrice: 20,
+          minPrice: DEFAULT_DRYER_AMOUNT,
+          initialTime: 40,
+          default: "low",
+          temperature: ["low", "medium", "high"]
+        }
+      },
+      outlet: { outletCode: "undefined", operatorCode: "undefined" }
+    };
+  }
+}
+
+const occupiedHintRe = /\b(running|occupied|in\s*use|busy|processing)\b/i;
 
 async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">> {
   if (!UPSTREAM_ENDPOINT) throw new Error("Missing UPSTREAM_ENDPOINT env");
-  const url = UPSTREAM_ENDPOINT.includes("?") ? `${UPSTREAM_ENDPOINT}&v=${Date.now()}` : `${UPSTREAM_ENDPOINT}?v=${Date.now()}`;
+  const url = UPSTREAM_ENDPOINT.includes("?")
+    ? `${UPSTREAM_ENDPOINT}&v=${Date.now()}`
+    : `${UPSTREAM_ENDPOINT}?v=${Date.now()}`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -53,6 +155,9 @@ async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">
   });
 
   const text = await res.text();
+  let json: any = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+
   try {
     console.log("[response]", {
       status: res.status,
@@ -60,22 +165,32 @@ async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">
       snippet: text.slice(0, 400)
     });
   } catch {}
-  let json: any = null;
-  try { json = text ? JSON.parse(text) : null; } catch {}
+
+  const findCheckoutUrl = (): string | null => {
+    if (json && typeof json === "object") {
+      const candidates = [
+        json?.data?.url,
+        json?.url,
+        json?.checkoutUrl,
+        json?.data?.checkoutUrl
+      ].filter(Boolean) as string[];
+      for (const u of candidates) if (CHECKOUT_URL_RE.test(String(u))) return String(u);
+    }
+    const m = text.match(CHECKOUT_URL_RE);
+    return m ? m[0] : null;
+  };
 
   if (res.status === 200) {
-    if (json?.status === "url" || typeof json?.data?.url === "string") return "Available";
-    if (/running/i.test(text)) return "Occupied";
-    return "Available";
+    const checkoutUrl = findCheckoutUrl();
+    if (checkoutUrl) return "Available";
+    if (occupiedHintRe.test(text) || occupiedHintRe.test(JSON.stringify(json || {}))) return "Occupied";
+    return "Unknown"; // <- no URL => do NOT assume free
   }
 
-  if (res.status === 409 || /\brunning\b/i.test(text)) return "Occupied";
-  if (res.status === 400) {
-    if (/version/i.test(text)) return "Unknown";
-    return "Unknown";
-  }
+  if (res.status === 409 || occupiedHintRe.test(text)) return "Occupied";
+  if (res.status === 400) return "Unknown";
 
-  if (res.ok) return "Available";
+  if (res.ok) return "Unknown";
 
   return "Unknown";
 }
@@ -97,46 +212,78 @@ export default async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify({ error: "machines[] required" }), { status: 400, headers: { "Content-Type": "application/json" } });
   }
 
-  const base = readBase();
-
-  const targets = list.slice(0, 20).map((m: any) => ({
-    id: sanitizeString(m.id),
-    name: sanitizeString(m.name, 128) || "GENERIC",
-    machineNo: sanitizeString(m.machineNo, 128)
-  })).filter(x => x.machineNo);
-
-  const bodies = targets.map((t: any) => {
-    const b = structuredClone(base);
-    b.machine = { ...(base.machine || {}), name: t.name };
-    b.outlet = { ...(base.outlet || {}), machineNo: t.machineNo };
-    if (!b.time) b.time = new Date().toISOString();
-
-    if (typeof b.amount !== "number") b.amount = DEFAULT_AMOUNT;
-    if (typeof b.duration !== "number") b.duration = DEFAULT_DURATION;
-    if (!b.mode) b.mode = DEFAULT_MODE;
-    if (!b.paymentAmount && typeof b.amount === "number") b.paymentAmount = b.amount.toFixed(2);
-
-    if (payload.defaults) {
-      const { amount, duration, mode, paymentAmount } = payload.defaults;
-      if (amount != null) b.amount = amount;
-      if (duration != null) b.duration = duration;
-      if (mode) b.mode = sanitizeString(mode, 16);
-      if (paymentAmount) b.paymentAmount = String(paymentAmount);
-    }
-    if (typeof t.amount === "number") b.amount = t.amount;
-    if (typeof t.duration === "number") b.duration = t.duration;
-    if (t.mode) b.mode = sanitizeString(t.mode, 16);
-    if (t.paymentAmount) b.paymentAmount = String(t.paymentAmount);
-
-    return { t, b };
-  });
+  const targets = list
+    .slice(0, 20)
+    .map((m: any) => ({
+      id: sanitizeString(m.id),
+      label: sanitizeString(m.label, 128),
+      name: sanitizeString(m.name, 128) || "GENERIC",
+      machineNo: sanitizeString(m.machineNo, 128),
+      amount: typeof m.amount === "number" ? m.amount : undefined,
+      duration: typeof m.duration === "number" ? m.duration : undefined,
+      mode: m.mode ? sanitizeString(m.mode, 16) : undefined,
+      temperature: m.temperature ? sanitizeString(m.temperature, 16) : undefined
+    }))
+    .filter(x => x.machineNo);
 
   const results: Array<{ id: string; status: MachineStatus }> = [];
-  for (const { t, b } of bodies) {
+
+  const hostelId = String(payload?.hostel || "").trim();
+
+  for (const t of targets) {
+    const kind = detectKind(t.machineNo, t.name);
+    let b = baseFor(kind, hostelId);
+
+    // Common fields
+    b.machine = { ...(b.machine || {}), name: t.name };
+    b.outlet = { ...(b.outlet || {}), machineNo: t.machineNo };
+    if (!b.time) b.time = new Date().toISOString();
+
+    if (kind === "washer") {
+      if (typeof b.amount !== "number") b.amount = DEFAULT_AMOUNT;
+      if (typeof b.duration !== "number") b.duration = DEFAULT_DURATION;
+      if (!b.mode) b.mode = DEFAULT_MODE;
+
+      if (payload.defaults) {
+        const { amount, duration, mode, paymentAmount } = payload.defaults;
+        if (amount != null) b.amount = amount;
+        if (duration != null) b.duration = duration;
+        if (mode) b.mode = sanitizeString(mode, 16);
+        if (paymentAmount) b.paymentAmount = String(paymentAmount);
+      }
+      if (typeof t.amount === "number") b.amount = t.amount;
+      if (typeof t.duration === "number") b.duration = t.duration;
+      if (t.mode) b.mode = t.mode;
+
+      if ("temperature" in b) delete (b as any).temperature;
+    } else {
+      if (typeof b.amount !== "number") b.amount = DEFAULT_DRYER_AMOUNT;
+      if (typeof b.duration !== "number") b.duration = DEFAULT_DRYER_DURATION;
+      if (!b.temperature) b.temperature = DEFAULT_DRYER_TEMPERATURE;
+
+      if (payload.defaults) {
+        const { amount, duration, temperature, paymentAmount } = payload.defaults;
+        if (amount != null) b.amount = amount;
+        if (duration != null) b.duration = duration;
+        if (temperature) b.temperature = sanitizeString(temperature, 16);
+        if (paymentAmount) b.paymentAmount = String(paymentAmount);
+      }
+      if (typeof t.amount === "number") b.amount = t.amount;
+      if (typeof t.duration === "number") b.duration = t.duration;
+      if (t.temperature) b.temperature = t.temperature;
+
+      if ("mode" in b) delete (b as any).mode;
+    }
+
+    if (!b.paymentAmount && typeof b.amount === "number") {
+      b.paymentAmount = b.amount.toFixed(2);
+    }
+
     try {
       try {
         console.log("[request]", {
           id: String(t.id || t.machineNo),
+          kind,
           body: b
         });
       } catch {}
@@ -145,7 +292,7 @@ export default async function handler(req: Request): Promise<Response> {
       try {
         console.log("[machine][status]", { id: String(t.id || t.machineNo), status });
       } catch {}
-    } catch (e) {
+    } catch {
       results.push({ id: String(t.id || t.machineNo), status: "Error" });
     }
   }
