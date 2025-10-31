@@ -17,8 +17,13 @@ const DEFAULT_DRYER_AMOUNT = Number(process.env.DEFAULT_DRYER_AMOUNT ?? DEFAULT_
 const DEFAULT_DRYER_DURATION = Number(process.env.DEFAULT_DRYER_DURATION ?? 40);
 const DEFAULT_DRYER_TEMPERATURE = String(process.env.DEFAULT_DRYER_TEMPERATURE || "low");
 
-const CHECKOUT_URL_RE =
-  /https:\/\/pg\.revenuemonster\.my\/v3\/checkout\?checkoutId=[A-Za-z0-9_-]+/;
+const CHECKOUT_URL_PATTERN = String(process.env.CHECKOUT_URL_PATTERN || "");
+let CHECKOUT_URL_RE: RegExp | null = null;
+try {
+  CHECKOUT_URL_RE = CHECKOUT_URL_PATTERN ? new RegExp(CHECKOUT_URL_PATTERN) : null;
+} catch {
+  CHECKOUT_URL_RE = null;
+}
 
 // JSON bases
 function readJSONEnv<T = any>(key: string, fallback: T): T {
@@ -87,17 +92,10 @@ function baseFor(kind: Kind, hostelId?: string): any {
     return {
       machine: {
         type: "Washer",
-        capacity: "13kg",
         online: true,
-        running: false,
-        outletName: "USM05",
-        priceData: [
-          { defaultmode: "cold", runtime: 37, name: "cold", price: DEFAULT_AMOUNT },
-          { defaultmode: "cold", runtime: 37, name: "warm", price: DEFAULT_AMOUNT },
-          { defaultmode: "cold", runtime: 37, name: "hot",  price: DEFAULT_AMOUNT }
-        ]
+        running: false
       },
-      outlet: { outletCode: "undefined", operatorCode: "undefined" }
+      outlet: {}
     };
   } else {
     const resolved = resolveDryerBase(hostelId);
@@ -105,20 +103,10 @@ function baseFor(kind: Kind, hostelId?: string): any {
     return {
       machine: {
         type: "Dryer",
-        capacity: "10kg",
         online: true,
-        running: false,
-        outletName: "USM05",
-        priceData: {
-          runTime: 10,
-          maxPrice: 20,
-          minPrice: DEFAULT_DRYER_AMOUNT,
-          initialTime: 40,
-          default: "low",
-          temperature: ["low", "medium", "high"]
-        }
+        running: false
       },
-      outlet: { outletCode: "undefined", operatorCode: "undefined" }
+      outlet: {}
     };
   }
 }
@@ -169,16 +157,18 @@ async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">
 
   const findCheckoutUrl = (): string | null => {
     if (json && typeof json === "object") {
-      const candidates = [
-        json?.data?.url,
-        json?.url,
-        json?.checkoutUrl,
-        json?.data?.checkoutUrl
-      ].filter(Boolean) as string[];
-      for (const u of candidates) if (CHECKOUT_URL_RE.test(String(u))) return String(u);
+      const candidates = [json?.data?.url, json?.url, json?.checkoutUrl, json?.data?.checkoutUrl].filter(Boolean) as string[];
+      if (CHECKOUT_URL_RE) {
+        for (const u of candidates) if (CHECKOUT_URL_RE.test(String(u))) return String(u);
+      } else {
+        if (candidates.length) return String(candidates[0]);
+      }
     }
-    const m = text.match(CHECKOUT_URL_RE);
-    return m ? m[0] : null;
+    if (CHECKOUT_URL_RE) {
+      const m = text.match(CHECKOUT_URL_RE);
+      return m ? m[0] : null;
+    }
+    return null;
   };
 
   if (res.status === 200) {
