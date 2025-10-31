@@ -11,11 +11,30 @@ function parseJSONEnv<T>(key: string, fallback: T): T {
   }
 }
 
+function readSites(): any[] {
+  const keys: string[] = ["PUBLIC_SITES_JSON"];
+  for (let i = 1; i <= 20; i++) keys.push(`PUBLIC_SITES_JSON_${i}`);
+  const out: any[] = [];
+  for (const k of keys) {
+    const raw = process.env[k];
+    if (!raw) continue;
+    try {
+      const val = JSON.parse(raw);
+      if (Array.isArray(val)) {
+        for (const s of val) if (s && typeof s === "object") out.push(s);
+      } else if (val && typeof val === "object") {
+        out.push(val);
+      }
+    } catch {}
+  }
+  return out;
+}
+
 export default async function handler(req?: Request): Promise<Response> {
   const url = req ? new URL(req.url) : null;
   const selectedHostel = url?.searchParams.get("hostel") || "";
 
-  const sites = parseJSONEnv<any[]>("PUBLIC_SITES_JSON", []);
+  const sites = readSites();
 
   function normalizeId(x: string): string {
     return String(x || "").trim();
