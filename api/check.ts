@@ -5,6 +5,7 @@ const UPSTREAM_ORIGIN = process.env.UPSTREAM_ORIGIN || "";
 const UPSTREAM_REFERER = process.env.UPSTREAM_REFERER || "";
 const UPSTREAM_X_REQUESTED_WITH = process.env.UPSTREAM_X_REQUESTED_WITH || "";
 const UPSTREAM_HEADERS_JSON = process.env.UPSTREAM_HEADERS_JSON || "";
+const DRYER_STATUS_ENDPOINT = String(process.env.DRYER_STATUS_ENDPOINT || "");
 
 // Washer
 const DEFAULT_AMOUNT = Number(process.env.DEFAULT_AMOUNT ?? 4.5);
@@ -184,7 +185,7 @@ async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">
     const checkoutUrl = findCheckoutUrl();
     if (checkoutUrl) return "Available";
     if (occupiedHintRe.test(text) || occupiedHintRe.test(JSON.stringify(json || {}))) return "Occupied";
-    return "Unknown"; // <- no URL => do NOT assume free
+    return "Unknown";
   }
 
   if (res.status === 409 || occupiedHintRe.test(text)) return "Occupied";
@@ -193,6 +194,68 @@ async function classifyProbe(body: any): Promise<Exclude<MachineStatus, "Error">
   if (res.ok) return "Unknown";
 
   return "Unknown";
+}
+
+function resolveOperatorId(hostelId?: string): string {
+  const id = String(hostelId || "").trim().toUpperCase();
+  const tryKeys = [
+    id ? `DRYER_OPERATOR_ID_${id}` : "",
+    id ? `OPERATOR_ID_${id}` : "",
+    "DRYER_OPERATOR_ID",
+    "OPERATOR_ID"
+  ].filter(Boolean);
+  for (const k of tryKeys) {
+    const v = process.env[k];
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  return "";
+}
+
+async function classifyDryerByGetMachine(machineNo: string, hostelId?: string): Promise<Exclude<MachineStatus, "Error">> {
+  const operatorId = resolveOperatorId(hostelId);
+  if (!DRYER_STATUS_ENDPOINT || !operatorId || !machineNo) return "Unknown";
+
+  const url = DRYER_STATUS_ENDPOINT.includes("?")
+    ? `${DRYER_STATUS_ENDPOINT}&v=${Date.now()}`
+    : `${DRYER_STATUS_ENDPOINT}?v=${Date.now()}`;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Accept": "application/json,text/plain,*/*"
+  };
+  if (UPSTREAM_ORIGIN) headers["Origin"] = UPSTREAM_ORIGIN;
+  if (UPSTREAM_REFERER) headers["Referer"] = UPSTREAM_REFERER;
+  if (UPSTREAM_X_REQUESTED_WITH) headers["X-Requested-With"] = UPSTREAM_X_REQUESTED_WITH;
+  if (UPSTREAM_HEADERS_JSON) {
+    try {
+      const extra = JSON.parse(UPSTREAM_HEADERS_JSON);
+      for (const k of Object.keys(extra || {})) {
+        const v = String((extra as any)[k]);
+        if (v) headers[k] = v;
+      }
+    } catch {}
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ machineNo, operatorId }),
+    redirect: "manual"
+  });
+
+  const textRaw = await res.text();
+  const cleaned = String(textRaw || "").replace(/\s|"/g, "").trim();
+  const matchSegments = cleaned.match(/[A-Za-z0-9+/=]+/g);
+  const token = matchSegments && matchSegments.length ? matchSegments[matchSegments.length - 1] : cleaned;
+
+  try {
+    console.log("[dryer][getMachine]", { machineNo, status: res.status, tokenSnippet: token.slice(-6) });
+  } catch {}
+
+  if (!res.ok) return "Unknown";
+
+  if (token.endsWith("==")) return "Available";
+  return "Occupied";
 }
 
 export default async function handler(req: Request): Promise<Response> {
@@ -234,7 +297,7 @@ export default async function handler(req: Request): Promise<Response> {
     const kind = detectKind(t.machineNo, t.name);
     let b = baseFor(kind, hostelId);
 
-    // Common fields
+    // Common fields for washer payload
     b.machine = { ...(b.machine || {}), name: t.name };
     b.outlet = { ...(b.outlet || {}), machineNo: t.machineNo };
     if (!b.time) b.time = new Date().toISOString();
@@ -280,18 +343,17 @@ export default async function handler(req: Request): Promise<Response> {
     }
 
     try {
-      try {
-        console.log("[request]", {
-          id: String(t.id || t.machineNo),
-          kind,
-          body: b
-        });
-      } catch {}
-      const status = await classifyProbe(b);
-      results.push({ id: String(t.id || t.machineNo), status });
-      try {
-        console.log("[machine][status]", { id: String(t.id || t.machineNo), status });
-      } catch {}
+      if (kind === "dryer") {
+        const status = await classifyDryerByGetMachine(t.machineNo, hostelId);
+        results.push({ id: String(t.id || t.machineNo), status });
+      } else {
+        try {
+          console.log("[request]", { id: String(t.id || t.machineNo), kind, body: b });
+        } catch {}
+        const status = await classifyProbe(b);
+        results.push({ id: String(t.id || t.machineNo), status });
+      }
+      try { console.log("[machine][status]", { id: String(t.id || t.machineNo), status: results[results.length - 1].status }); } catch {}
     } catch {
       results.push({ id: String(t.id || t.machineNo), status: "Error" });
     }

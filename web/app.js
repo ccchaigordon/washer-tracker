@@ -81,9 +81,6 @@ async function checkAll() {
       const label = meta.label || m.id;
       return tile(label, m.status, data.checkedAt);
     }).join("");
-
-    const hasDryer = CONFIG.machines.some(meta => String(meta.id || "").toUpperCase().startsWith("D") || /-d\d*/i.test(String(meta.machineNo || "")) || /dryer/i.test(String(meta.label || meta.name || "")));
-    if (hasDryer) showToast("Dryer status seems to be inaccurate (for now). Based on washer status, available dryers are usually more.");
   } catch (error) {
     updated.textContent = "Error checking status";
     console.error("Error:", error);
@@ -91,13 +88,6 @@ async function checkAll() {
     btnText.textContent = "Refresh Status";
     btn.disabled = false;
   }
-}
-
-function showToast(message) {
-  const el = document.getElementById("toast");
-  if (!el) return;
-  el.innerHTML = `<button class="close" aria-label="Close" onclick="this.parentElement.classList.remove('show')">×</button>${message}`;
-  el.classList.add("show");
 }
 
 btn.addEventListener("click", checkAll);
